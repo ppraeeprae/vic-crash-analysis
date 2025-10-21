@@ -23,7 +23,7 @@ This project analyzes Victorian road crash data (9 joined tables) to predict cra
 6. Publish dashboard summarizing key insights
 
 ## 🧩 Authors
-Project maintained by **Ruethaimart Kongchuensin** (Master of IT, Swinburne University)
+Project maintained by **Ruethaimart Kongchuensin** (Master of IT, Swinburne University), **Waralee Sridokmai** (Master of Data Science, Swinburne University), **Stuart O'Donnell** (Master of IT, Swinburne University)
 
 ---
 
