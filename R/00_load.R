@@ -2,13 +2,13 @@
 # 0) Working directory
 # =========================
 # The simplest way: select the data folder directly
-setwd("D:/COS80023 Big Data/vic_crash_dhd_project/vic-crash-analysis/data")     
+library(here)
+setwd(here::here())        # go to project root
 getwd()                 # Screenshot 1: Shows the successfully set working directory path
 
 # =========================
 # 1) Packages
 # =========================
-install.packages("janitor")
 library(tidyverse)
 library(readr)
 library(dplyr)
@@ -19,15 +19,15 @@ library(stringr)
 # =========================
 # 2) Read CSV files
 # =========================
-accident       <- read_csv("accident.csv")
-acc_event      <- read_csv("accident_event.csv")
-acc_location   <- read_csv("accident_location.csv")
-atmos          <- read_csv("atmospheric_cond.csv")
-node           <- read_csv("node.csv")
-person         <- read_csv("person.csv")
-road_surface   <- read_csv("road_surface_cond.csv")
-sub_dca        <- read_csv("sub_dca.csv")
-vehicle        <- read_csv("vehicle.csv")
+accident       <- read_csv("data/accident.csv")
+acc_event      <- read_csv("data/accident_event.csv")
+acc_location   <- read_csv("data/accident_location.csv")
+atmos          <- read_csv("data/atmospheric_cond.csv")
+node           <- read_csv("data/node.csv")
+person         <- read_csv("data/person.csv")
+road_surface   <- read_csv("data/road_surface_cond.csv")
+sub_dca        <- read_csv("data/sub_dca.csv")
+vehicle        <- read_csv("data/vehicle.csv")
 
 ls()                      # Check that all data objects are loaded
 glimpse(accident)         # Screenshot 2: Example of one dataset before cleaning
@@ -84,10 +84,10 @@ per_agg <- person %>%
 # =========================
 merged_data <- accident %>%
   left_join(node,         by = "accident_no") %>%
-  left_join(atmos,        by = "accident_no") %>%
-  left_join(road_surface, by = "accident_no") %>%
+  left_join(atmos,        by = "accident_no", relationship = "many-to-many") %>%
+  left_join(road_surface, by = "accident_no", relationship = "many-to-many") %>%
   left_join(acc_location, by = "accident_no") %>%
-  left_join(sub_dca,      by = "accident_no") %>%
+  left_join(sub_dca,      by = "accident_no", relationship = "many-to-many") %>%
   left_join(acc_event_agg,by = "accident_no") %>%
   left_join(veh_agg,      by = "accident_no") %>%
   left_join(per_agg,      by = "accident_no")
@@ -98,14 +98,18 @@ glimpse(merged_data)      # Screenshot 3: Structure after merging
 # =========================
 # 6) Basic cleaning
 # =========================
-# Remove duplicated columns caused by joining
-merged_data <- merged_data %>% select(-c(node_id.x, node_id.y), .keep = "all")
+# 6a. Safely drop duplicate node_id columns if they exist
+dup_cols <- c("node_id.x", "node_id.y")
+dup_cols <- dup_cols[dup_cols %in% names(merged_data)]
 
-# Check missing values in latitude/longitude
+if (length(dup_cols) > 0) {
+  merged_data <- merged_data %>% select(-all_of(dup_cols))
+}
+
+# 6b. Check missing latitude/longitude
 sum(is.na(merged_data$latitude) | is.na(merged_data$longitude))  # Screenshot 4: Missing coordinates count
 
-# Fill missing coordinates with mean values to keep the number of rows consistent
-# (Justify this approach in the report)
+# 6c. Fill missing coords with mean so we don't lose rows downstream
 merged_data$latitude[is.na(merged_data$latitude)]   <- mean(merged_data$latitude,  na.rm = TRUE)
 merged_data$longitude[is.na(merged_data$longitude)] <- mean(merged_data$longitude, na.rm = TRUE)
 
