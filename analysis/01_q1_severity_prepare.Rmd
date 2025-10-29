@@ -1,0 +1,170 @@
+---
+title: "Q1 Severity Preparation"
+author: "Q1 Team"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+.libPaths("C:/Users/Pongo/Documents/R/win-library/4.5")
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+library(tidyverse)
+library(janitor)
+library(data.table)
+```
+
+# Data Loading and Preparation
+
+First, let's load our merged data:
+
+```{r load-data}
+# Load the merged dataset
+merged_all <- fread("data/raw/merged_all_raw.csv")
+```
+
+# Data Cleaning for Q1 - Severity Analysis
+
+Let's prepare our data for severity analysis:
+
+```{r clean-severity}
+# Select relevant columns for severity analysis using data.table syntax
+# Note: merged_all contains raw columns; we map to expected names where needed.
+q1_severity <- merged_all[, .(
+    accident_no,
+    severity,                 # target variable (1 Fatal, 2 Serious, 3 Minor)
+    speed_zone,
+    light_condition,
+    weather = atmosph_cond_desc,         # from atmospheric_cond.csv
+    road_surface = surface_cond_desc,    # from road_surface_cond.csv
+    road_geometry_desc,
+    main_vehicle_body = vehicle_body_style,
+  main_vehicle_make = vehicle_make,
+  age_group                            # driver/person age group
+)]
+
+# Clean speed zone data
+# Treat 0, 777, 888, 999 as placeholders/unknown and set to NA
+# Ensure numeric type for comparisons and summaries
+q1_severity[, speed_zone := as.numeric(speed_zone)]
+q1_severity[speed_zone %in% c(0, 777, 888, 999), speed_zone := NA_real_]
+
+# Handle missing values in weather and road_surface
+q1_severity[, weather := fifelse(is.na(weather), "Unknown", weather)]
+q1_severity[, road_surface := fifelse(is.na(road_surface), "Unknown", road_surface)]
+
+# Convert severity to factor with meaningful labels
+q1_severity[, severity := factor(severity,
+                               levels = c(1, 2, 3),
+                               labels = c("Fatal", "Serious", "Minor"))]
+
+# Handle missing speed_zone values with median imputation (based on valid speeds)
+q1_severity[, speed_zone := ifelse(is.na(speed_zone),
+                                  median(speed_zone, na.rm = TRUE),
+                                  speed_zone)]
+
+# Create a clean version with realistic speed limits
+q1_severity_clean <- copy(q1_severity)
+
+# Cap speeds to realistic limits (<=250 km/h)
+q1_severity_clean <- q1_severity_clean[speed_zone <= 250]
+```
+
+# Data Quality Checks
+
+Let's examine our cleaned dataset:
+
+```{r data-checks}
+# Check number of rows
+cat("Number of records:", nrow(q1_severity_clean), "\n\n")
+
+# Check speed zone distribution
+cat("Speed Zone Summary:\n")
+summary(q1_severity_clean$speed_zone)
+
+# Check severity distribution
+cat("\nSeverity Distribution:\n")
+print(table(q1_severity_clean$severity))
+```
+
+# Summary Statistics
+
+Let's examine our cleaned dataset:
+
+```{r summary-stats}
+# Basic summary of the cleaned data
+summary(q1_severity)
+
+# Check severity distribution
+table(q1_severity$severity)
+```
+
+# Save Cleaned Dataset
+
+```{r save-data}
+# Save the cleaned dataset using data.table's fast writer
+if (!dir.exists("data/processed")) dir.create("data/processed", recursive = TRUE)
+fwrite(q1_severity_clean, "data/processed/q1_severity_clean.csv")
+```
+
+# Accident-level feature set (one row per accident)
+
+We also create an accident-level dataset suitable for modeling at the crash level. This aggregates person/vehicle info per accident and avoids target leakage (we do not use per-person injury level as a predictor).
+
+```{r accident-level}
+# Helper to get first non-missing value
+first_non_na <- function(x) x[which(!is.na(x) & x != "")[1]]
+
+# Read person and vehicle raw tables to avoid duplicated counts from merged_all
+dt_vehicle <- fread("data/vehicle.csv")
+dt_person  <- fread("data/person.csv")
+
+# Base accident-level features (environmental)
+acc_env <- merged_all[, .(
+  severity = first(severity),
+  speed_zone = suppressWarnings(as.numeric(first_non_na(speed_zone))),
+  light_condition = first_non_na(light_condition),
+  weather = first_non_na(atmosph_cond_desc),
+  road_surface = first_non_na(surface_cond_desc),
+  road_geometry_desc = first_non_na(road_geometry_desc)
+), by = accident_no]
+
+# Vehicles per accident and modal vehicle attributes
+veh_agg <- dt_vehicle[, .(
+  vehicles_n = uniqueN(na.omit(vehicle_id)),
+  main_vehicle_body = if (!all(is.na(vehicle_body_style))) names(sort(table(vehicle_body_style), decreasing = TRUE))[1] else NA_character_,
+  main_vehicle_make = if (!all(is.na(vehicle_make))) names(sort(table(vehicle_make), decreasing = TRUE))[1] else NA_character_
+), by = accident_no]
+
+# Driver-only aggregates (road_user_type == 2)
+drv_agg <- dt_person[road_user_type == 2, .(
+  drivers_n = .N,
+  driver_pct_male = mean(sex == "M", na.rm = TRUE),
+  driver_age_group_mode = if (!all(is.na(age_group))) names(sort(table(age_group), decreasing = TRUE))[1] else NA_character_
+), by = accident_no]
+
+# Join all pieces
+acc_df <- acc_env[veh_agg, on = "accident_no"][drv_agg, on = "accident_no"]
+
+# Clean speed zone codes and cap
+acc_df[, speed_zone := as.numeric(speed_zone)]
+acc_df[speed_zone %in% c(0, 777, 888, 999), speed_zone := NA_real_]
+acc_df[, speed_zone := ifelse(is.na(speed_zone), median(speed_zone, na.rm = TRUE), speed_zone)]
+acc_df <- acc_df[speed_zone <= 250]
+
+# Factor target with labels
+acc_df[, severity := factor(severity, levels = c(1, 2, 3), labels = c("Fatal", "Serious", "Minor"))]
+
+# Save accident-level dataset
+fwrite(acc_df, "data/processed/q1_severity_accident.csv")
+```
+
+# Notes
+
+- This file prepares features for Q1 severity modeling and saves `data/processed/q1_severity_clean.csv`.
+- The raw merge remains in `analysis/00_load_data.Rmd`.
+- Modeling is in `analysis/q1_severity_model.Rmd`.
