@@ -1,0 +1,148 @@
+---
+title: "Load and Merge Raw Crash Data"
+author: "Q1 Analysis"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+.libPaths("C:/Users/Pongo/Documents/R/win-library/4.5")
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+## Overview
+
+This notebook loads all raw crash data files and merges them into a single comprehensive dataset for analysis.
+
+Important: This file performs merging only. No cleaning, filtering, or feature engineering is done here. Any cleaning should be done in a separate script (e.g., `R-Q1-Ploy/01_clean_feature.R`) or another Rmd.
+
+## Load Libraries
+
+```{r load-libraries}
+library(tidyverse)
+library(janitor)
+library(data.table)
+library(here)
+```
+
+## 1. Load All Datasets
+
+```{r load-data}
+accident         <- fread(here("data", "accident.csv")) %>% clean_names()
+accident_event   <- fread(here("data", "accident_event.csv")) %>% clean_names()
+accident_location<- fread(here("data", "accident_location.csv")) %>% clean_names()
+atmo             <- fread(here("data", "atmospheric_cond.csv")) %>% clean_names()
+node             <- fread(here("data", "node.csv")) %>% clean_names()
+person           <- fread(here("data", "person.csv")) %>% clean_names()
+surface          <- fread(here("data", "road_surface_cond.csv")) %>% clean_names()
+sub_dca          <- fread(here("data", "sub_dca.csv")) %>% clean_names()
+vehicle          <- fread(here("data", "vehicle.csv")) %>% clean_names()
+```
+
+## 2. Check Data Dimensions
+
+```{r check-dimensions}
+data_dims <- tibble(
+  Dataset = c("accident", "accident_event", "accident_location", "atmo", 
+              "node", "person", "surface", "sub_dca", "vehicle"),
+  Rows = c(nrow(accident), nrow(accident_event), nrow(accident_location), 
+           nrow(atmo), nrow(node), nrow(person), nrow(surface), 
+           nrow(sub_dca), nrow(vehicle)),
+  Columns = c(ncol(accident), ncol(accident_event), ncol(accident_location), 
+              ncol(atmo), ncol(node), ncol(person), ncol(surface), 
+              ncol(sub_dca), ncol(vehicle))
+)
+
+print(data_dims)
+```
+
+## 3. Merge All Datasets
+
+Keep all individual records from each table. Join tables to accident as the base table.
+
+```{r merge-data}
+merged_all <- accident %>%
+    left_join(accident_event,    by = "accident_no") %>%
+    left_join(accident_location,  by = "accident_no") %>%
+    left_join(atmo,              by = "accident_no") %>%
+    left_join(surface,           by = "accident_no") %>%
+    left_join(node,              by = "accident_no") %>%
+    left_join(sub_dca,           by = "accident_no") %>%
+    left_join(person,            by = "accident_no") %>%
+    left_join(vehicle,           by = c("accident_no", "vehicle_id"))
+```
+
+## 4. Check the Merged Dataset
+
+```{r check-merged}
+cat("Merged dataset dimensions:\n")
+cat("Rows:", nrow(merged_all), "\n")
+cat("Columns:", ncol(merged_all), "\n\n")
+
+cat("First few rows:\n")
+glimpse(merged_all)
+```
+
+## 5. Check for Missing Data
+
+```{r check-missing}
+missing_summary <- merged_all %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "column", values_to = "missing_count") %>%
+  mutate(pct_missing = round(missing_count / nrow(merged_all) * 100, 2)) %>%
+  filter(missing_count > 0) %>%
+  arrange(desc(missing_count))
+
+head(missing_summary, 20)
+```
+
+### Targeted missingness (vehicle-related columns only)
+
+The overall missingness counts above include rows where vehicle columns don't apply (e.g., pedestrians or rows without a matching vehicle). The breakdown below focuses on vehicle-related rows only.
+
+```{r check-missing-vehicle, message=FALSE}
+# Helper to compute % missing that handles both character and numeric
+pct_na <- function(v) {
+  if (is.numeric(v)) round(mean(is.na(v)) * 100, 2) else round(mean(is.na(v) | v == "") * 100, 2)
+}
+
+# Rows that have a vehicle id (i.e., where vehicle fields logically apply)
+nonveh <- merged_all %>% filter(!is.na(vehicle_id) & vehicle_id != "")
+
+veh_missing <- tibble(
+  column = c("vehicle_power", "carry_capacity", "vehicle_weight", "cubic_capacity", "vehicle_year_manuf"),
+  pct_missing_vehicle_rows = c(
+    pct_na(nonveh$vehicle_power),
+    pct_na(nonveh$carry_capacity),
+    pct_na(nonveh$vehicle_weight),
+    pct_na(nonveh$cubic_capacity),
+    pct_na(nonveh$vehicle_year_manuf)
+  )
+)
+
+veh_missing
+```
+
+## 6. Save Merged Dataset
+
+```{r save-data}
+# Create directory if it doesn't exist
+if (!dir.exists(here("data", "raw"))) {
+  dir.create(here("data", "raw"), recursive = TRUE)
+}
+
+# Save merged dataset
+write.csv(merged_all, here("data", "raw", "merged_all_raw.csv"), row.names = FALSE)
+
+cat("Merged dataset saved to: data/raw/merged_all_raw.csv\n")
+cat("Total rows:", nrow(merged_all), "\n")
+cat("Total columns:", ncol(merged_all), "\n")
+```
+
+## Summary
+
+- All raw data files have been loaded and merged
+- The merged dataset contains all individual records (people, vehicles, events per accident)
+- No filtering or summarization has been applied at this stage
+- Data is saved to `data/raw/merged_all_raw.csv` for further cleaning and analysis
