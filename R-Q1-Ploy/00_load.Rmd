@@ -1,0 +1,396 @@
+> # Load Libraries
+> suppressPackageStartupMessages({
++     library(tidyverse)
++     library(janitor)
++     library(data.table)
++     library(here)
++     library(arrow) # for saving Feather/Parquet
++     library(assertthat) # for quick checks
++ })
+> # Standardise key columns and coerce to character
+> 
+> std_keys <- function(dt, keys = c("accident_no", "vehicle_id", "person_id")) {
++     for (k in keys) {
++         if (k %in% names(dt)) {
++             dt[[k]] <- as.character(trimws(dt[[k]]))
++         }
++     }
++     dt
++ }
+> 
+> # Rename alternative column names to expected schema
+> 
+> harmonise_names <- function(dt) {
++     nm <- names(dt)
++     
++     # Vehicle id variants
++     
++     if ("vehicle_no" %in% nm && !"vehicle_id" %in% nm) {
++         dt <- dt |> rename(vehicle_id = vehicle_no)
++     }
++     
++     # Accident number variants
++     
++     if ("accident_number" %in% nm && !"accident_no" %in% nm) {
++         dt <- dt |> rename(accident_no = accident_number)
++     }
++     
++     # Person id variants
++     
++     if ("participant_id" %in% nm && !"person_id" %in% nm) {
++         dt <- dt |> rename(person_id = participant_id)
++     }
++     
++     return(dt)
++ }
+> 
+> # Safe fread + clean names + harmonise + standardise keys
+> 
+> read_clean <- function(...) {
++     fread(...) |>
++         clean_names() |>
++         harmonise_names() |>
++         std_keys()
++ }
+> 
+> # Percent missing helper
+> 
+> pct_na <- function(v) {
++     if (is.numeric(v)) {
++         round(mean(is.na(v)) * 100, 2)
++     } else {
++         round(mean(is.na(v) | v == "") * 100, 2)
++     }
++ }
+> # Load All Datasets
+> accident          <- read_clean(here("data", "accident.csv"))
+> accident_event    <- read_clean(here("data", "accident_event.csv"))
+> accident_location <- read_clean(here("data", "accident_location.csv"))
+> atmo              <- read_clean(here("data", "atmospheric_cond.csv"))
+> node              <- read_clean(here("data", "node.csv"))
+> person            <- read_clean(here("data", "person.csv"))
+> surface           <- read_clean(here("data", "road_surface_cond.csv"))
+> sub_dca           <- read_clean(here("data", "sub_dca.csv"))
+> vehicle           <- read_clean(here("data", "vehicle.csv"))
+> # Check Dimensions
+> datasets <- list(
++     accident = accident,
++     accident_event = accident_event,
++     accident_location = accident_location,
++     atmo = atmo,
++     node = node,
++     person = person,
++     surface = surface,
++     sub_dca = sub_dca,
++     vehicle = vehicle
++ )
+> 
+> data_dims <- imap_dfr(datasets, ~ tibble(
++     Dataset = .y,
++     Rows = nrow(.x),
++     Columns = ncol(.x)
++ ))
+> 
+> print(data_dims)
+# A tibble: 9 × 3
+  Dataset             Rows Columns
+  <chr>              <int>   <int>
+1 accident          182039      23
+2 accident_event    301710      13
+3 accident_location 182039       9
+4 atmo              184408       4
+5 node              184828      11
+6 person            425352      14
+7 surface           183053       4
+8 sub_dca           261416       4
+9 vehicle           331992      37
+> 
+> # Quick check for key existence
+> 
+> assert_that("accident_no" %in% names(accident))
+[1] TRUE
+> assert_that(all(c("accident_no", "vehicle_id") %in% names(vehicle)))
+[1] TRUE
+> # Merge Datasets
+> merged_accident <- accident %>%
++     left_join(accident_event,    by = "accident_no") %>%
++     left_join(accident_location, by = "accident_no") %>%
++     left_join(atmo,              by = "accident_no") %>%
++     left_join(surface,           by = "accident_no") %>%
++     left_join(node,              by = "accident_no") %>%
++     left_join(sub_dca,           by = "accident_no")
+Warning messages:
+1: In left_join(., atmo, by = "accident_no") :
+  Detected an unexpected many-to-many relationship between `x` and `y`.
+ℹ Row 135 of `x` matches multiple rows in `y`.
+ℹ Row 33756 of `y` matches multiple rows in `x`.
+ℹ If a many-to-many relationship is expected, set `relationship = "many-to-many"` to
+  silence this warning.
+2: In left_join(., surface, by = "accident_no") :
+  Detected an unexpected many-to-many relationship between `x` and `y`.
+ℹ Row 2189 of `x` matches multiple rows in `y`.
+ℹ Row 2991 of `y` matches multiple rows in `x`.
+ℹ If a many-to-many relationship is expected, set `relationship = "many-to-many"` to
+  silence this warning.
+3: In left_join(., node, by = "accident_no") :
+  Detected an unexpected many-to-many relationship between `x` and `y`.
+ℹ Row 112 of `x` matches multiple rows in `y`.
+ℹ Row 2201 of `y` matches multiple rows in `x`.
+ℹ If a many-to-many relationship is expected, set `relationship = "many-to-many"` to
+  silence this warning.
+4: In left_join(., sub_dca, by = "accident_no") :
+  Detected an unexpected many-to-many relationship between `x` and `y`.
+ℹ Row 1 of `x` matches multiple rows in `y`.
+ℹ Row 27130 of `y` matches multiple rows in `x`.
+ℹ If a many-to-many relationship is expected, set `relationship = "many-to-many"` to
+  silence this warning.
+> 
+> # Merge person and vehicle
+> 
+> merged_all <- merged_accident %>%
++     left_join(person,  by = "accident_no") %>%
++     left_join(vehicle, by = c("accident_no", "vehicle_id"))
+Warning message:
+In left_join(., person, by = "accident_no") :
+  Detected an unexpected many-to-many relationship between `x` and `y`.
+ℹ Row 1 of `x` matches multiple rows in `y`.
+ℹ Row 311998 of `y` matches multiple rows in `x`.
+ℹ If a many-to-many relationship is expected, set `relationship = "many-to-many"` to
+  silence this warning.
+
+> # Check Merged Data
+> cat("Merged dataset dimensions:\n")
+Merged dataset dimensions:
+> cat("Rows:", nrow(merged_all), "\n")
+Rows: 1079835 
+> cat("Columns:", ncol(merged_all), "\n\n")
+Columns: 110 
+
+> 
+> cat("First few rows:\n")
+First few rows:
+> glimpse(merged_all)
+Rows: 1,079,835
+Columns: 110
+$ accident_no            <chr> "T20120005091", "T20120005091", "T20120005091", "T20120005…
+$ accident_date          <IDate> 2012-01-01, 2012-01-01, 2012-01-01, 2012-01-01, 2012-01-…
+$ accident_time          <chr> "15:30:00", "15:30:00", "15:30:00", "15:30:00", "15:30:00"…
+$ accident_type          <int> 4, 4, 4, 4, 4, 4, 4, 4, 6, 8, 1, 1, 1, 4, 4, 4, 4, 4, 4, 4…
+$ accident_type_desc     <chr> "Collision with a fixed object", "Collision with a fixed o…
+$ day_of_week            <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1…
+$ day_week_desc          <chr> "Sunday", "Sunday", "Sunday", "Sunday", "Sunday", "Sunday"…
+$ dca_code               <int> 171, 171, 171, 171, 171, 171, 171, 171, 184, 174, 134, 134…
+$ dca_desc               <chr> "LEFT OFF CARRIAGEWAY INTO OBJECT/PARKED VEHICLE", "LEFT O…
+$ light_condition        <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 6, 1, 1, 1, 5, 5, 5, 5, 5, 5, 5…
+$ node_id.x              <int> 250198, 250198, 250198, 250198, 250198, 250198, 250198, 25…
+$ no_of_vehicles         <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1…
+$ no_persons_killed      <int> 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0…
+$ no_persons_inj_2       <int> 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1…
+$ no_persons_inj_3       <int> 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0…
+$ no_persons_not_inj     <int> 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0…
+$ no_persons             <int> 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 3, 3, 3, 1, 1, 1, 1, 1, 1, 1…
+$ police_attend          <int> 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1…
+$ road_geometry          <int> 5, 5, 5, 5, 5, 5, 5, 5, 2, 2, 5, 5, 5, 2, 2, 2, 2, 2, 2, 2…
+$ road_geometry_desc     <chr> "Not at intersection", "Not at intersection", "Not at inte…
+$ severity               <int> 3, 3, 3, 3, 3, 3, 3, 3, 2, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2…
+$ speed_zone             <int> 100, 100, 100, 100, 100, 100, 100, 100, 60, 999, 50, 50, 5…
+$ rma                    <chr> "Local Road", "Local Road", "Local Road", "Local Road", "L…
+$ event_seq_no           <int> 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2…
+$ event_type             <chr> "3", "3", "3", "3", "C", "C", "C", "C", "1", "2", "C", "C"…
+$ event_type_desc        <chr> "Ran off carriageway", "Ran off carriageway", "Ran off car…
+$ vehicle_1_id           <chr> "A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "B", "B"…
+$ vehicle_1_coll_pt      <chr> "9", "9", "9", "9", "7", "7", "7", "7", "1", "9", "4", "4"…
+$ vehicle_1_coll_pt_desc <chr> "Not known or Not Applicable", "Not known or Not Applicabl…
+$ vehicle_2_id           <chr> "", "", "", "", "", "", "", "", "", "", "A", "A", "A", "",…
+$ vehicle_2_coll_pt      <chr> "", "", "", "", "", "", "", "", "", "", "5", "5", "5", "",…
+$ vehicle_2_coll_pt_desc <chr> "", "", "", "", "", "", "", "", "", "", "Left front corner…
+$ person_id.x            <chr> "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""…
+$ object_type            <int> 99, 99, 99, 99, 2, 2, 2, 2, 99, 99, 99, 99, 99, 99, 99, 99…
+$ object_type_desc       <chr> "Not Applicable", "Not Applicable", "Not Applicable", "Not…
+$ node_id.y              <int> 250198, 250198, 250198, 250198, 250198, 250198, 250198, 25…
+$ road_route_1           <int> 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999, 9999…
+$ road_name              <chr> "WILSONS", "WILSONS", "WILSONS", "WILSONS", "WILSONS", "WI…
+$ road_type              <chr> "ROAD", "ROAD", "ROAD", "ROAD", "ROAD", "ROAD", "ROAD", "R…
+$ road_name_int          <chr> "SEAWARD", "SEAWARD", "SEAWARD", "SEAWARD", "SEAWARD", "SE…
+$ road_type_int          <chr> "DRIVE", "DRIVE", "DRIVE", "DRIVE", "DRIVE", "DRIVE", "DRI…
+$ distance_location      <int> 1005, 1005, 1005, 1005, 1005, 1005, 1005, 1005, 0, 0, 29, …
+$ direction_location     <chr> "N", "N", "N", "N", "N", "N", "N", "N", "NW", "E", "NW", "…
+$ atmosph_cond           <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1…
+$ atmosph_cond_seq       <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1…
+$ atmosph_cond_desc      <chr> "Clear", "Clear", "Clear", "Clear", "Clear", "Clear", "Cle…
+$ surface_cond           <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1…
+$ surface_cond_desc      <chr> "Dry", "Dry", "Dry", "Dry", "Dry", "Dry", "Dry", "Dry", "D…
+$ surface_cond_seq       <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1…
+$ node_id                <int> 250198, 250198, 250198, 250198, 250198, 250198, 250198, 25…
+$ node_type              <chr> "N", "N", "N", "N", "N", "N", "N", "N", "I", "I", "N", "N"…
+$ amg_x                  <dbl> 2552228, 2552228, 2552228, 2552228, 2552228, 2552228, 2552…
+$ amg_y                  <dbl> 2315973, 2315973, 2315973, 2315973, 2315973, 2315973, 2315…
+$ lga_name               <chr> "BASS COAST", "BASS COAST", "BASS COAST", "BASS COAST", "B…
+$ lga_name_all           <chr> "BASS COAST", "BASS COAST", "BASS COAST", "BASS COAST", "B…
+$ deg_urban_name         <chr> "RURAL_VICTORIA", "RURAL_VICTORIA", "RURAL_VICTORIA", "RUR…
+$ latitude               <dbl> -38.65654, -38.65654, -38.65654, -38.65654, -38.65654, -38…
+$ longitude              <dbl> 145.5999, 145.5999, 145.5999, 145.5999, 145.5999, 145.5999…
+$ postcode_crash         <int> 3995, 3995, 3995, 3995, 3995, 3995, 3995, 3995, 3030, 3057…
+$ sub_dca_code           <chr> "Q02", "Q02", "V01", "V01", "Q02", "Q02", "V01", "V01", "N…
+$ sub_dca_seq            <int> 2, 2, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 3, 4, 2, 1, 3, 4…
+$ sub_dca_code_desc      <chr> "Tree (shrub/scrub)", "Tree (shrub/scrub)", "No vehicle mo…
+$ person_id.y            <chr> "01", "A", "01", "A", "01", "A", "01", "A", "A", "A", "01"…
+$ vehicle_id             <chr> "A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "B", "B"…
+$ sex                    <chr> "M", "F", "M", "F", "M", "F", "M", "F", "M", "F", "F", "M"…
+$ age_group              <chr> "30-39", "30-39", "30-39", "30-39", "30-39", "30-39", "30-…
+$ inj_level              <int> 4, 3, 4, 3, 4, 3, 4, 3, 2, 3, 3, 4, 4, 2, 2, 2, 2, 2, 2, 2…
+$ inj_level_desc         <chr> "Not injured", "Other injury", "Not injured", "Other injur…
+$ seating_position       <chr> "LF", "D", "LF", "D", "LF", "D", "LF", "D", "D", "D", "LF"…
+$ helmet_belt_worn       <int> 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2…
+$ road_user_type         <int> 3, 2, 3, 2, 3, 2, 3, 2, 4, 6, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2…
+$ road_user_type_desc    <chr> "Passengers", "Drivers", "Passengers", "Drivers", "Passeng…
+$ licence_state          <chr> "V", "V", "V", "V", "V", "V", "V", "V", "V", "V", "V", "V"…
+$ taken_hospital         <chr> "", "", "", "", "", "", "", "", "Y", "", "", "", "", "Y", …
+$ ejected_code           <int> 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0…
+$ vehicle_year_manuf     <int> 1999, 1999, 1999, 1999, 1999, 1999, 1999, 1999, 2008, NA, …
+$ vehicle_dca_code       <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1…
+$ initial_direction      <chr> "S", "S", "S", "S", "S", "S", "S", "S", "NE", "N", "NW", "…
+$ road_surface_type      <int> 3, 3, 3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1…
+$ road_surface_type_desc <chr> "Gravel", "Gravel", "Gravel", "Gravel", "Gravel", "Gravel"…
+$ reg_state              <chr> "V", "V", "V", "V", "V", "V", "V", "V", "V", "", "V", "V",…
+$ vehicle_body_style     <chr> "SEDAN", "SEDAN", "SEDAN", "SEDAN", "SEDAN", "SEDAN", "SED…
+$ vehicle_make           <chr> "HOLDEN", "HOLDEN", "HOLDEN", "HOLDEN", "HOLDEN", "HOLDEN"…
+$ vehicle_model          <chr> "COMMOD", "COMMOD", "COMMOD", "COMMOD", "COMMOD", "COMMOD"…
+$ vehicle_power          <lgl> NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA…
+$ vehicle_type           <int> 1, 1, 1, 1, 1, 1, 1, 1, 10, 13, 1, 1, 4, 2, 2, 2, 2, 2, 2,…
+$ vehicle_type_desc      <chr> "Car", "Car", "Car", "Car", "Car", "Car", "Car", "Car", "M…
+$ vehicle_weight         <int> NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, 2900, NA, …
+$ construction_type      <chr> "R", "R", "R", "R", "R", "R", "R", "R", "", "", "R", "R", …
+$ fuel_type              <chr> "P", "P", "P", "P", "P", "P", "P", "P", "P", "", "P", "P",…
+$ no_of_wheels           <int> 4, 4, 4, 4, 4, 4, 4, 4, 2, NA, 4, 4, 4, 4, 4, 4, 4, 4, 4, …
+$ no_of_cylinders        <int> 8, 8, 8, 8, 8, 8, 8, 8, 2, NA, 8, 8, 4, 8, 8, 8, 8, 8, 8, …
+$ seating_capacity       <int> 5, 5, 5, 5, 5, 5, 5, 5, NA, NA, 5, 5, 5, 5, 5, 5, 5, 5, 5,…
+$ tare_weight            <int> 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, NA, NA, 15…
+$ total_no_occupants     <int> 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1…
+$ carry_capacity         <int> NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, 1171, NA, …
+$ cubic_capacity         <int> NA, NA, NA, NA, NA, NA, NA, NA, 1800, NA, 5400, 5400, NA, …
+$ final_direction        <chr> "S", "S", "S", "S", "S", "S", "S", "S", "NE", "N", "NW", "…
+$ driver_intent          <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 6, 6, 1, 3, 3, 3, 3, 3, 3, 3…
+$ vehicle_movement       <int> 1, 1, 1, 1, 1, 1, 1, 1, 1, 18, 6, 6, 1, 3, 3, 3, 3, 3, 3, …
+$ trailer_type           <chr> "H", "H", "H", "H", "H", "H", "H", "H", "H", "H", "H", "H"…
+$ vehicle_colour_1       <chr> "WHI", "WHI", "WHI", "WHI", "WHI", "WHI", "WHI", "WHI", "O…
+$ vehicle_colour_2       <chr> "ZZ", "ZZ", "ZZ", "ZZ", "ZZ", "ZZ", "ZZ", "ZZ", "ZZ", "ZZ"…
+$ caught_fire            <int> 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2…
+$ initial_impact         <chr> "7", "7", "7", "7", "7", "7", "7", "7", "1", "N", "4", "4"…
+$ lamps                  <int> 2, 2, 2, 2, 2, 2, 2, 2, 2, 9, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2…
+$ level_of_damage        <int> 2, 2, 2, 2, 2, 2, 2, 2, 1, 6, 1, 1, 1, 5, 5, 5, 5, 5, 5, 5…
+$ towed_away_flag        <int> 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1…
+$ traffic_control        <int> 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0…
+$ traffic_control_desc   <chr> "No control", "No control", "No control", "No control", "N…
+> # Missing Data Summary
+> missing_summary <- merged_all %>%
++     summarise(across(everything(), ~sum(is.na(.)))) %>%
++     pivot_longer(everything(), names_to = "column", values_to = "missing_count") %>%
++     mutate(pct_missing = round(missing_count / nrow(merged_all) * 100, 2)) %>%
++     filter(missing_count > 0) %>%
++     arrange(desc(missing_count))
+> 
+> head(missing_summary, 20)
+# A tibble: 20 × 3
+   column                 missing_count pct_missing
+   <chr>                          <int>       <dbl>
+ 1 vehicle_power                1079835      100   
+ 2 carry_capacity                939132       87.0 
+ 3 vehicle_weight                939039       87.0 
+ 4 cubic_capacity                938311       86.9 
+ 5 seating_capacity              172459       16.0 
+ 6 no_of_wheels                  138730       12.8 
+ 7 no_of_cylinders               109210       10.1 
+ 8 tare_weight                    64325        5.96
+ 9 ejected_code                   63676        5.9 
+10 vehicle_year_manuf             51806        4.8 
+11 vehicle_dca_code               38250        3.54
+12 vehicle_model                  35617        3.3 
+13 total_no_occupants             35598        3.3 
+14 vehicle_movement               35596        3.3 
+15 initial_direction              35594        3.3 
+16 road_surface_type              35594        3.3 
+17 road_surface_type_desc         35594        3.3 
+18 reg_state                      35594        3.3 
+19 vehicle_body_style             35594        3.3 
+20 vehicle_make                   35594        3.3 
+> # Vehicle Columns Missingness
+> nonveh <- merged_all %>% filter(!is.na(vehicle_id) & vehicle_id != "")
+> 
+> veh_cols <- c("vehicle_power", "carry_capacity", "vehicle_weight", "cubic_capacity", "vehicle_year_manuf")
+> veh_cols <- veh_cols[veh_cols %in% names(nonveh)]
+> 
+> veh_missing <- tibble(
++     column = veh_cols,
++     pct_missing_vehicle_rows = map_dbl(veh_cols, ~ pct_na(nonveh[[.x]]))
++ )
+> 
+> veh_missing
+# A tibble: 5 × 2
+  column             pct_missing_vehicle_rows
+  <chr>                                 <dbl>
+1 vehicle_power                        100   
+2 carry_capacity                        86.5 
+3 vehicle_weight                        86.5 
+4 cubic_capacity                        86.4 
+5 vehicle_year_manuf                     1.56
+> # Save Merged Dataset
+> # Create folder 
+> 
+> if (!dir.exists(here("data", "raw"))) {
++     dir.create(here("data", "raw"), recursive = TRUE)
++ }
+> 
+> # Save as CSV
+> 
+> csv_path <- here("data", "raw", "merged_all_raw.csv")
+> fwrite(merged_all, file = csv_path)
+> 
+> # Save as Feather 
+> 
+> feather_path <- here("data", "raw", "merged_all_raw.feather")
+> write_feather(merged_all, feather_path)
+> 
+> cat("Saved merged dataset:\n")
+Saved merged dataset:
+> cat("CSV  ->", csv_path, "\n")
+CSV  -> C:/Users/waral/OneDrive - Swinburne University/Project Big Data/data/data/raw/merged_all_raw.csv 
+> cat("Feather ->", feather_path, "\n")
+Feather -> C:/Users/waral/OneDrive - Swinburne University/Project Big Data/data/data/raw/merged_all_raw.feather 
+> sessionInfo()
+R version 4.5.1 (2025-06-13 ucrt)
+Platform: x86_64-w64-mingw32/x64
+Running under: Windows 11 x64 (build 26100)
+
+Matrix products: default
+  LAPACK version 3.12.1
+
+locale:
+[1] LC_COLLATE=English_Australia.utf8  LC_CTYPE=English_Australia.utf8   
+[3] LC_MONETARY=English_Australia.utf8 LC_NUMERIC=C                      
+[5] LC_TIME=English_Australia.utf8    
+
+time zone: Australia/Sydney
+tzcode source: internal
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] assertthat_0.2.1  arrow_21.0.0.1    here_1.0.2        data.table_1.17.8
+ [5] janitor_2.2.1     lubridate_1.9.4   forcats_1.0.1     stringr_1.5.2    
+ [9] dplyr_1.1.4       purrr_1.1.0       readr_2.1.5       tidyr_1.3.1      
+[13] tibble_3.3.0      ggplot2_4.0.0     tidyverse_2.0.0  
+
+loaded via a namespace (and not attached):
+ [1] sass_0.4.10        utf8_1.2.6         generics_0.1.4     stringi_1.8.7     
+ [5] hms_1.1.4          digest_0.6.37      magrittr_2.0.4     evaluate_1.0.5    
+ [9] grid_4.5.1         timechange_0.3.0   RColorBrewer_1.1-3 fastmap_1.2.0     
+[13] jsonlite_2.0.0     rprojroot_2.1.1    scales_1.4.0       jquerylib_0.1.4   
+[17] cli_3.6.5          rlang_1.1.6        bit64_4.6.0-1      cachem_1.1.0      
+[21] withr_3.0.2        yaml_2.3.10        tools_4.5.1        tzdb_0.5.0        
+[25] vctrs_0.6.5        R6_2.6.1           lifecycle_1.0.4    snakecase_0.11.1  
+[29] bit_4.6.0          pkgconfig_2.0.3    pillar_1.11.1      bslib_0.9.0       
+[33] gtable_0.3.6       rsconnect_1.6.0    glue_1.8.0         xfun_0.53         
+[37] tidyselect_1.2.1   rstudioapi_0.17.1  knitr_1.50         farver_2.1.2      
+[41] htmltools_0.5.8.1  rmarkdown_2.30     compiler_4.5.1     S7_0.2.0     
