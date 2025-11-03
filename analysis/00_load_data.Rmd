@@ -6,7 +6,6 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-.libPaths("C:/Users/Pongo/Documents/R/win-library/4.5")
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 knitr::opts_knit$set(root.dir = normalizePath(".."))
 ```
