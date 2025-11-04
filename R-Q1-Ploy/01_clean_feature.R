@@ -59,6 +59,11 @@ first_non_na <- function(x) x[which(!is.na(x) & x != "")[1]]
 dt_vehicle <- fread(here("data", "vehicle.csv"))
 dt_person  <- fread(here("data", "person.csv"))
 
+# Ensure raw tables use snake_case column names to match references below
+# (e.g., ROAD_USER_TYPE -> road_user_type, VEHICLE_MAKE -> vehicle_make)
+setnames(dt_vehicle, janitor::make_clean_names(names(dt_vehicle)))
+setnames(dt_person,  janitor::make_clean_names(names(dt_person)))
+
 # Base environmental features from merged_all
 acc_env <- merged_all[, .(
 	severity = first(severity),

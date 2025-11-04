@@ -159,6 +159,87 @@ if (isTRUE(polr_ok)) {
 	message("Skipping ordinal outputs due to fitting/prediction issue (e.g., rank deficiency).")
 }
 
+# 6b) Visualizations (shown in RStudio Plots pane and optionally saved)
+plots_dir <- here("plots", "q1_model")
+if (!dir.exists(plots_dir)) dir.create(plots_dir, recursive = TRUE)
+
+# Accuracy comparison bar chart
+metrics_df <- tibble(
+	model = c("Baseline", "Multinomial"),
+	accuracy = c(acc_base, acc)
+)
+if (isTRUE(polr_ok)) metrics_df <- bind_rows(metrics_df, tibble(model = "Ordinal", accuracy = acc_o))
+
+p_acc <- ggplot(metrics_df, aes(x = model, y = accuracy, fill = model)) +
+	geom_col(width = 0.6, show.legend = FALSE) +
+	geom_text(aes(label = sprintf("%0.1f%%", accuracy * 100)), vjust = -0.4, size = 3) +
+	scale_y_continuous(limits = c(0, 1)) +
+	labs(title = "Severity model accuracy by approach", x = NULL, y = "Accuracy (proportion)") +
+	theme_minimal(base_size = 11) +
+	theme(plot.title = element_text(face = "bold"))
+print(p_acc)
+try(suppressWarnings(ggsave(filename = here(plots_dir, "q1_accuracy.png"), plot = p_acc, width = 7, height = 4, dpi = 120)), silent = TRUE)
+
+# Confusion matrix heatmap (Multinomial)
+cm_df <- as.data.frame(as.table(mn_cm)) %>%
+	as_tibble()
+# Standardize column names regardless of whether as.data.frame() produced Var1/Var2 or Actual/Pred
+if ("Var1" %in% names(cm_df)) cm_df <- cm_df %>% rename(Actual = Var1)
+if ("Var2" %in% names(cm_df)) cm_df <- cm_df %>% rename(Pred = Var2)
+if ("Freq" %in% names(cm_df)) cm_df <- cm_df %>% rename(n = Freq)
+cm_df <- cm_df %>%
+	group_by(Actual) %>%
+	mutate(pct = ifelse(sum(n) > 0, n / sum(n), 0)) %>%
+	ungroup()
+
+p_cm <- ggplot(cm_df, aes(x = Pred, y = Actual, fill = pct)) +
+	geom_tile(color = "white") +
+	geom_text(aes(label = n), color = "white", fontface = "bold", size = 3) +
+	scale_fill_gradient(low = "#dce9f2", high = "#2b6cb0", limits = c(0, 1)) +
+	coord_equal() +
+	labs(title = "Confusion matrix (Multinomial)", x = "Predicted", y = "Actual", fill = "Row %") +
+	theme_minimal(base_size = 11) +
+	theme(plot.title = element_text(face = "bold"))
+print(p_cm)
+try(suppressWarnings(ggsave(filename = here(plots_dir, "q1_confusion_multinomial.png"), plot = p_cm, width = 6, height = 5, dpi = 120)), silent = TRUE)
+
+# Variable importance bar plot (Multinomial)
+if (exists("imp") && is.data.frame(imp) && nrow(imp) > 0) {
+	imp_plot <- imp %>%
+		mutate(feature = forcats::fct_reorder(feature, importance)) %>%
+		ggplot(aes(x = importance, y = feature)) +
+		geom_col(fill = "#3182bd") +
+		labs(title = "Top 20 features by coefficient magnitude (Multinomial)", x = "Importance (|coef| sum)", y = NULL) +
+		theme_minimal(base_size = 11) +
+		theme(plot.title = element_text(face = "bold"))
+	print(imp_plot)
+	try(suppressWarnings(ggsave(filename = here(plots_dir, "q1_importance_top20.png"), plot = imp_plot, width = 7, height = 6, dpi = 120)), silent = TRUE)
+}
+
+# Optional: Confusion matrix heatmap (Ordinal) if available
+if (isTRUE(polr_ok)) {
+	plr_cm <- as.matrix(table(Actual = test_o$severity, Pred = preds_o))
+	cm_o_df <- as.data.frame(as.table(plr_cm)) %>%
+		as_tibble()
+	if ("Var1" %in% names(cm_o_df)) cm_o_df <- cm_o_df %>% rename(Actual = Var1)
+	if ("Var2" %in% names(cm_o_df)) cm_o_df <- cm_o_df %>% rename(Pred = Var2)
+	if ("Freq" %in% names(cm_o_df)) cm_o_df <- cm_o_df %>% rename(n = Freq)
+	cm_o_df <- cm_o_df %>%
+		group_by(Actual) %>%
+		mutate(pct = ifelse(sum(n) > 0, n / sum(n), 0)) %>%
+		ungroup()
+	p_cm_o <- ggplot(cm_o_df, aes(x = Pred, y = Actual, fill = pct)) +
+		geom_tile(color = "white") +
+		geom_text(aes(label = n), color = "white", fontface = "bold", size = 3) +
+		scale_fill_gradient(low = "#e9d8fd", high = "#6b46c1", limits = c(0, 1)) +
+		coord_equal() +
+		labs(title = "Confusion matrix (Ordinal polr)", x = "Predicted", y = "Actual", fill = "Row %") +
+		theme_minimal(base_size = 11) +
+		theme(plot.title = element_text(face = "bold"))
+	print(p_cm_o)
+	try(suppressWarnings(ggsave(filename = here(plots_dir, "q1_confusion_ordinal.png"), plot = p_cm_o, width = 6, height = 5, dpi = 120)), silent = TRUE)
+}
+
 # 7) Save artifacts as CSVs
 models_dir <- here("models")
 if (!dir.exists(models_dir)) dir.create(models_dir, recursive = TRUE)
