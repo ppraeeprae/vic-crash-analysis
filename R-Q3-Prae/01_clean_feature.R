@@ -18,22 +18,36 @@ library(lubridate)
 library(forcats)
 
 # 2) Load the merged data -------------------------------------------------
-# NOTE: 00_load.R must have been run before this
-merged <- readr::read_csv("merged_with_features.csv") %>% clean_names()
+# NOTE: Use the unified raw merge produced by R-Q1-Ploy/00_load.R
+#       Path: data/raw/merged_all_raw.csv
+merged <- readr::read_csv(here("data", "raw", "merged_all_raw.csv")) %>% clean_names()
 
 # 3) Helper functions -----------------------------------------------------
-# 3a. map severity text/labels into 3 levels + binary severe flag
+# 3a. map severity into 3 levels + binary severe flag (robust to numeric/text)
 derive_severity <- function(x) {
-  x_low <- tolower(as.character(x))
-  case_when(
-    str_detect(x_low, "fatal")                     ~ "Fatal",
-    str_detect(x_low, "serious")                   ~ "Serious injury",
-    str_detect(x_low, "other|minor|non")           ~ "Other injury",
-    TRUE                                           ~ "Other injury"
-  )
+  # try numeric codes first (common Vic coding: 1=fatal, 2=serious, 3=other, 4=PDO)
+  x_num <- suppressWarnings(as.numeric(as.character(x)))
+  out <- rep(NA_character_, length(x))
+  if (any(!is.na(x_num))) {
+    out[!is.na(x_num) & x_num == 1] <- "Fatal"
+    out[!is.na(x_num) & x_num == 2] <- "Serious injury"
+    out[!is.na(x_num) & x_num %in% c(3,4)] <- "Other injury"
+  }
+  # fill remaining using text detection
+  idx_na <- is.na(out)
+  if (any(idx_na)) {
+    x_low <- tolower(as.character(x))[idx_na]
+    out[idx_na] <- case_when(
+      str_detect(x_low, "fatal")                     ~ "Fatal",
+      str_detect(x_low, "serious")                   ~ "Serious injury",
+      str_detect(x_low, "other|minor|non|pdo|damage")~ "Other injury",
+      TRUE                                            ~ "Other injury"
+    )
+  }
+  out
 }
 
-# 3b. weather grouping (atmosph_cond_desc)
+  # 3x. simple helpers for accident-level aggregation -----------------------
 derive_weather <- function(x) {
   x_low <- tolower(x)
   case_when(
@@ -87,8 +101,107 @@ collapse_age <- function(x) {
   )
 }
 
+# 3x. simple helpers for accident-level aggregation -----------------------
+first_non_na <- function(x) {
+  x[which(!is.na(x) & x != "")[1]]
+}
+
+mode_char <- function(x) {
+  x <- x[!is.na(x) & x != ""]
+  if (!length(x)) return(NA_character_)
+  names(sort(table(x), decreasing = TRUE))[1]
+}
+
+# 3x.1 standardize key columns that may vary in name across sources
+take_first_existing <- function(df, candidates) {
+  for (nm in candidates) {
+    if (nm %in% names(df)) return(df[[nm]])
+  }
+  return(rep(NA, nrow(df)))
+}
+
+# Create standardized columns used downstream regardless of original names
+merged <- merged %>%
+  mutate(
+    accident_date_std         = take_first_existing(., c("accident_date", "crash_date", "date")),
+    light_condition_num_std   = suppressWarnings(as.numeric(take_first_existing(., c("light_condition", "light_cond")))),
+    light_condition_desc_std  = take_first_existing(., c("light_condition_desc", "light_cond_desc")),
+    atmosph_cond_desc_std     = take_first_existing(., c("atmosph_cond_desc", "atmospheric_cond_desc", "atmospheric_condition_desc")),
+    surface_cond_desc_std     = take_first_existing(., c("surface_cond_desc", "road_surface_desc", "road_surface_condition_desc")),
+    person_id_std             = take_first_existing(., c("person_id", "personid")),
+    vehicle_id_std            = take_first_existing(., c("vehicle_id", "vehicleid")),
+    road_user_type_std        = suppressWarnings(as.numeric(take_first_existing(., c("road_user_type", "road_user_type_code")))),
+    sex_std                   = take_first_existing(., c("sex", "gender")),
+    age_group_std             = take_first_existing(., c("age_group", "agegroup")),
+    vehicle_year_manuf_std    = suppressWarnings(as.numeric(take_first_existing(., c("vehicle_year_manuf", "vehicle_year", "year_manufactured")))),
+    vehicle_body_style_std    = take_first_existing(., c("vehicle_body_style", "body_style", "vehicle_type")),
+    accident_year_std         = {
+      d <- suppressWarnings(lubridate::parse_date_time(accident_date_std, orders = c("Y-m-d","d/m/Y","Ymd","m/d/Y","d-b-Y","d-B-Y")))
+      suppressWarnings(as.numeric(lubridate::year(d)))
+    }
+  )
+
+# 3y. Build accident-level dataset from merged rows -----------------------
+# Environmental (take the first non-missing per accident)
+acc_env <- merged %>%
+  group_by(accident_no) %>%
+  summarise(
+    severity              = suppressWarnings(first_non_na(severity)),
+    atmosph_cond_desc     = first_non_na(atmosph_cond_desc_std),
+    surface_cond_desc     = first_non_na(surface_cond_desc_std),
+    light_condition_num   = suppressWarnings(as.numeric(first_non_na(light_condition_num_std))),
+    light_condition_desc  = first_non_na(light_condition_desc_std),
+    accident_year         = suppressWarnings(as.numeric(first_non_na(accident_year_std))),
+    .groups = "drop"
+  )
+
+# Vehicles: distinct by accident_no, vehicle_id to avoid duplicated joins
+veh_sub <- merged %>%
+  filter(!is.na(vehicle_id_std) & vehicle_id_std != "") %>%
+  distinct(accident_no, vehicle_id_std, .keep_all = TRUE)
+
+veh_agg <- veh_sub %>%
+  mutate(
+    vehicle_year_manuf = suppressWarnings(as.numeric(vehicle_year_manuf_std)),
+    vehicle_body_style = as.character(vehicle_body_style_std)
+  ) %>%
+  group_by(accident_no) %>%
+  summarise(
+    n_vehicles          = n_distinct(vehicle_id_std),
+    common_vehicle_type = mode_char(vehicle_body_style),
+    avg_vehicle_year    = suppressWarnings(mean(vehicle_year_manuf, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+# Persons: distinct by accident_no, person_id; drivers only where possible
+person_sub <- merged %>%
+  filter(!is.na(person_id_std) & person_id_std != "") %>%
+  distinct(accident_no, person_id_std, .keep_all = TRUE)
+
+drv_only <- person_sub %>%
+  mutate(road_user_type_std = suppressWarnings(as.numeric(road_user_type_std))) %>%
+  filter(is.na(road_user_type_std) | road_user_type_std == 2)  # if missing codes, keep all as fallback
+
+pers_agg <- drv_only %>%
+  mutate(
+    sex       = as.character(sex_std),
+    age_group = as.character(age_group_std)
+  ) %>%
+  group_by(accident_no) %>%
+  summarise(
+    n_persons          = n_distinct(person_id_std),
+    common_sex         = mode_char(sex),
+    common_age_group   = mode_char(age_group),
+    .groups = "drop"
+  )
+
+# Join all accident-level pieces
+acc <- acc_env %>%
+  left_join(veh_agg,  by = "accident_no") %>%
+  left_join(pers_agg, by = "accident_no")
+
 # 4) Derive / clean variables ---------------------------------------------
-q3 <- merged %>%
+q3 <- acc %>%
   mutate(
     # --- severity --------------------------------------------------------
     # If `severity` is numeric in your data, this will default to "Other injury".
@@ -100,15 +213,30 @@ q3 <- merged %>%
     # --- environmental ---------------------------------------------------
     weather_clean    = derive_weather(atmosph_cond_desc),
     surface_clean    = derive_surface(surface_cond_desc),
-    light_clean      = map_light_num(light_condition),
+    light_clean      = dplyr::if_else(!is.na(light_condition_num),
+                                      map_light_num(light_condition_num),
+                                      {
+                                        lcd <- tolower(as.character(light_condition_desc))
+                                        case_when(
+                                          str_detect(lcd, "day|sun|light") ~ "daylight",
+                                          str_detect(lcd, "dawn") ~ "dawn",
+                                          str_detect(lcd, "dusk") ~ "dusk",
+                                          str_detect(lcd, "street.*on") ~ "dark_street_lights_on",
+                                          str_detect(lcd, "street.*off") ~ "dark_street_lights_off",
+                                          str_detect(lcd, "dark|night") ~ "dark_no_street_lights",
+                                          TRUE ~ "other"
+                                        )
+                                      }
+    ),
     
     # --- behavioural / demographic --------------------------------------
-    age_group_clean  = collapse_age(common_age_group),
-    sex_common       = forcats::fct_na_value_to_level(as.factor(common_sex), level = "unknown"),
+  age_group_clean  = collapse_age(common_age_group),
+  sex_common       = forcats::fct_na_value_to_level(as.factor(common_sex), level = "unknown"),
     
     # --- vehicle factors -------------------------------------------------
-    vehicle_type_main  = forcats::fct_na_value_to_level(as.factor(common_vehicle_type), level = "unknown"),
-    vehicle_age_avg    = vehicle_age_avg,  # from 00_load.R (accident_year - avg_vehicle_year)
+  vehicle_type_main  = forcats::fct_na_value_to_level(as.factor(common_vehicle_type), level = "unknown"),
+  vehicle_age_avg    = ifelse(!is.na(accident_year) & !is.na(avg_vehicle_year),
+                accident_year - avg_vehicle_year, NA_real_),
     
     # --- interaction-friendly flags -------------------------------------
     is_wet_weather   = if_else(weather_clean %in% c("rain/storm", "fog/mist"), 1L, 0L),
@@ -126,7 +254,9 @@ q3 <- merged %>%
     night_x_male     = is_night * is_male_common,
     
     # For quick stratified summaries if needed
-    env_risk_combo   = paste(weather_clean, surface_clean, light_clean, sep = "_")
+    env_risk_combo   = paste(weather_clean, surface_clean, light_clean, sep = "_"),
+    # simple index to replace earlier engineered value (if any)
+    weather_road_index = coalesce(is_wet_weather + is_wet_surface, 0L)
   )
 
 # 5) Keep only columns relevant to Question 3 -----------------------------
@@ -167,7 +297,7 @@ q3_export <- q3 %>%
     night_x_male,
     env_risk_combo,
     
-    # keep the original engineered index as well (from 00_load.R)
+    # engineered index derived here
     weather_road_index
   )
 
